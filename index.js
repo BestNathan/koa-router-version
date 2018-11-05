@@ -2,26 +2,36 @@
 
 const semver = require('semver');
 
-function KoaRouterVersion() {
+const defaultOptions = {
+  requestHeader: 'Accept-Version',
+  responseHeader: 'X-Api-Version',
+  routeParam: 'version',
+  fallbackLatest: false,
+  defaultVersion: null,
+};
 
-  this.options = {
-    requestHeader: 'Accept-Version',
-    responseHeader: 'X-Api-Version',
-    routeParam: 'version',
-    fallbackLatest: false,
-    defaultVersion: null
-  };
-}
+// sort by version from larger to smaller
+const sorter = (a, b) => {
+  a = a.version;
+  b = b.version;
 
-function find(requested, tuples, fallbackLatest = false) {
-  if (requested === null || requested === '*') {
+  return semver.lt(a, b) ? 1 : -1;
+};
+
+function findMiddlewareWithVersion(version, tuples, fallbackLatest = false) {
+  // if `version` is null or accept all then return the latest
+  if (version === null || version === '*') {
     return tuples[0];
   }
-  for (let i=0; i<tuples.length; i++) {
-    if (semver.satisfies(tuples[i].version, requested)) {
-      return tuples[i];
+
+  // iterate and test version to match
+  for (const tuple of tuples) {
+    if (semver.satisfies(tuple.version, version)) {
+      return tuple;
     }
   }
+
+  // fallback latest
   if (fallbackLatest) {
     return tuples[0];
   }
@@ -29,45 +39,68 @@ function find(requested, tuples, fallbackLatest = false) {
   return null;
 }
 
-KoaRouterVersion.prototype.version = function(versions, options = {}) {
-  let tuples = [];
+function version(versions, options = {}) {
+  // make new opt and override default options
+  const opt = Object.assign({}, defaultOptions, options);
 
-  if (options.fallbackLatest && options.defaultVersion) {
-    throw new Error('Can not set options "fallbackLatest" and "defaultVersion" at same time');
-  }
+  // store different versions' middleware and sort for `opt.fallbackLatest`
+  const middlewareTuples = [];
+  for (const version in versions) middlewareTuples.push({version, middleware: versions[version]});
+  middlewareTuples.sort(sorter);
 
-  for (let key in versions) tuples.push({version: key, cb: versions[key]});
-  tuples.sort(function(a, b) {
-    a = a.version;
-    b = b.version;
-
-    return semver.lt(a, b) ? 1 : -1;
-  });
-
+  // router version middleware
   return (ctx, next) => {
-    let requested = null;
+    const {
+      requestHeader,
+      responseHeader,
+      routeParam,
+      fallbackLatest,
+      defaultVersion,
+    } = opt;
+    let requestedVersion = null;
 
-    const routeParam = options.routeParam || this.options.routeParam;
     if (
       routeParam !== '' &&
       ctx.params.hasOwnProperty(routeParam) &&
       typeof ctx.params[routeParam] === 'string'
     ) {
-      requested = ctx.params[routeParam].substr(1);
+      // get version to match from `params`
+      requestedVersion = ctx.params[routeParam].substr(1);
     } else {
-      requested = ctx.get(options.requestHeader || this.options.requestHeader) || null;
+      // get version to match from `header`
+      requestedVersion = ctx.get(requestHeader) || null;
     }
-    if (!requested && options.defaultVersion) {
-      requested = options.defaultVersion;
-    }
-    let found = find(requested, tuples, options.fallbackLatest || this.options.fallbackLatest);
-    if (found) {
-      ctx.state.apiVersion = found.version;
-      ctx.set(options.responseHeader || this.options.responseHeader, ctx.state.apiVersion);
-      return found.cb(ctx, next);
-    }
-    ctx.throw(400, 'Version ' + requested + ' is not supported');
-  };
-};
 
-let koaRouterVersion = module.exports = exports = new KoaRouterVersion;
+    // if not find any version to match
+    // then use defaultVersion
+    if (!requestedVersion && defaultVersion) {
+      requestedVersion = defaultVersion;
+    }
+
+    // find version matched
+    const found = findMiddlewareWithVersion(requestedVersion, middlewareTuples, fallbackLatest);
+    if (found) {
+      const {
+        version,
+        middleware,
+      } = found;
+
+      // set to state
+      ctx.state = ctx.state || {};
+      ctx.state.apiVersion = version;
+
+      // set response header
+      ctx.set(responseHeader, version);
+
+      return middleware(ctx, next);
+    }
+
+    // not found or match then throw
+    ctx.throw(400, 'Version ' + requestedVersion + ' is not supported');
+  };
+}
+
+module.exports = {
+  defaultOptions,
+  version,
+};
