@@ -86,7 +86,6 @@ function version(versions, options = {}) {
       } = found;
 
       // set to state
-      ctx.state = ctx.state || {};
       ctx.state.apiVersion = version;
 
       // set response header
